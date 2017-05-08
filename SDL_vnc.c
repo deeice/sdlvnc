@@ -658,9 +658,14 @@ static int HandleServerMessage_text(tSDL_vnc *vnc)
     DBMESSAGE("Server text length: %u\n",serverText.length);
     // ??? Protocol sais U16 is length to read
     // TightVNC server sends a byte on empty string
+#if 1 /* ZIPIT_Z2 do not exit thread on text servermessage. */
+    // Maybe we need to check if its tightVNC before we read a byte
+    // otherwise we break the next msg and exit the client thread
+#else
     if (serverText.length==0) {
             serverText.length=1;
     }
+#endif
     while (serverText.length>0) {
         int result = Recv(vnc->socket,vnc->buffer,serverText.length % VNC_BUFSIZE,0);
         if (result <= 0) {
@@ -670,7 +675,11 @@ static int HandleServerMessage_text(tSDL_vnc *vnc)
             serverText.length -= result;
         }
     }
+#if 1 /* ZIPIT_Z2 do not exit thread on text servermessage. */
+    return 1; // Returning zero exits the client thread.  
+#else
     return 0;
+#endif
 }
 
 
@@ -766,7 +775,11 @@ int vncClientThread (void *data) {
 		}
 	}
 
+#if 1 /* ZIPIT_Z2 do not exit thread on text servermessage. */
+	printf("vncClientThread: VNC client thread done.\n");
+#else
 	DBMESSAGE("vncClientThread: VNC client thread done.\n");
+#endif
 	return 0;
 
 
