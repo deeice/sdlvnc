@@ -777,7 +777,7 @@ void PrintUsage()
           fflush(stdout);
 	  vnc_server = calloc(sizeof(char), 128);
 	  fgets(vnc_server, 128, stdin);
-	  strtok(vnc_server, "\r\n");
+	  vnc_server = strtok(vnc_server, "\r\n");
 	  //sscanf("%s",vnc_server);
 	}
 	if (!strlen(vnc_password)) {
@@ -787,7 +787,7 @@ void PrintUsage()
 	  //fgets(vnc_password, 128, stdin);
 	  //strtok(vnc_password, "\r\n");
 	}
-	if (!strlen(vnc_server)) {
+	if (!vnc_server || !strlen(vnc_server)) {
 	 fprintf (stderr,"Need Servername.\n");
 	 PrintUsage();
          exit(1);
