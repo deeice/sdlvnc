@@ -239,14 +239,16 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
  SDL_Rect origin;
 
  float outScale = 1.0;
+ float invScale = 1.0;
 
  int inPan=0;
  int inloop;
  Uint8 mousebuttons, buttonmask;
- int mousex=0;
- int mousey=0;
- int priormousex=0;
- int priormousey=0;
+ int mousex=(DEFAULT_W / 2); // Start mouse at center of screen.
+ int mousey=(DEFAULT_H / 2);
+ int priormousex=(DEFAULT_W / 2);
+ int priormousey=(DEFAULT_H / 2);
+ int mx, my;
  int mousedown=0;
  int velocity=0;
 
@@ -272,13 +274,15 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
 	origin.w=DEFAULT_W;
 	origin.h=DEFAULT_H;
   
+ SDL_WarpMouse(mousex,mousey);
+
  inloop=1;
  while (inloop) {
     
   /* Check for events */
   while ( SDL_PollEvent(&event) ) {
 //	fprintf(stderr,"***EVENT**%d\n",event.type);
-   if (inPan) inPan=1;
+   if (inPan) inPan &= 1;
    switch (event.type) {
 #if 0
    case SDL_VIDEORESIZE:
@@ -375,30 +379,35 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
       case 234: key=0x0000; break;
 #ifdef ALLOW_ZOOMING
       case ',':
-	fprintf(stderr,"**KEY0** %d\n",key);
-	if (event.type == SDL_KEYDOWN && (event.key.keysym.mod & KMOD_CTRL)) {
-	  float oldScale = outScale;
-	  outScale = outScale - 0.05;
-	  if (outScale < 0.25) outScale = 0.25;
-	  fprintf(stderr,"**outScale = %1.2f \n",outScale);
-	  viewport.x = (int)((float)viewport.x * (outScale / oldScale));
-	  viewport.y = (int)((float)viewport.y * (outScale / oldScale));
-	  key=0x0000; 
-	}
-	else key=','; 
-	break;
       case '.':
-	fprintf(stderr,"**KEY0** %d\n",key);
+	// fprintf(stderr,"**KEY0** %d\n",key);
 	if (event.type == SDL_KEYDOWN && (event.key.keysym.mod & KMOD_CTRL)) {
 	  float oldScale = outScale;
-	  outScale = outScale + 0.05;
+	  if (key == ',') 
+	    outScale = outScale - 0.05;
+	  else
+	    outScale = outScale + 0.05;
+	  if (outScale < 0.25) outScale = 0.25;
 	  if (outScale > 1.0) outScale = 1.0;
-	  fprintf(stderr,"**outScale = %1.2f \n",outScale);
+	  invScale = 1.0f / outScale; // Only do the division once.
+	  // fprintf(stderr,"**outScale = %1.2f = 1/%1.2f\n",outScale,invScale);
 	  viewport.x = (int)((float)viewport.x * (outScale / oldScale));
 	  viewport.y = (int)((float)viewport.y * (outScale / oldScale));
+	  // Check the bounds
+	  mx = ((float)(viewport.x+viewport.w))*invScale;
+	  my = ((float)(viewport.y+viewport.h))*invScale;
+	  // fprintf(stderr,"ZOOM  Vmax(%d,%d)  v(%d,%d)\n", mx,my,viewport.x,viewport.y);
+	  if (mx > vnc->serverFormat.width)
+	    viewport.x=(vnc->serverFormat.width*outScale)-viewport.w;
+	  if (my > vnc->serverFormat.height)
+	    viewport.y=(vnc->serverFormat.height*outScale)-viewport.h;
+	  if (viewport.x < 0) viewport.x=0;
+	  if (viewport.y < 0) viewport.y=0;
+	  // Tell vnc to leave the mouse in the same spot on screen but at new scale.
+	  mousebuttons=SDL_GetMouseState(&mousex,&mousey);
+	  vncClientPointerevent(vnc, 0, (mousex+viewport.x) * invScale, (mousey+viewport.y) * invScale);
 	  key=0x0000; 
 	}
-	else key='.'; 
 	break;
 #endif
       default: key = event.key.keysym.sym;
@@ -475,12 +484,13 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
      }
 #endif
 //     fprintf(stderr,"**KEY** %d\n",key);
-
+     // 231 = SDLK_WORLD_71  Whats that for, the zipit OPTION key?
      if (event.type == SDL_KEYDOWN && event.key.keysym.sym == 231) {
 		inPan=1;
      } else if (event.type == SDL_KEYUP && event.key.keysym.sym == 231) {
                 inPan=0;
-     } else if (key != 0x0000) {
+     } else
+       if (key != 0x0000) {
 //     fprintf(stderr,"**KEY2** %d\n",key);
 	/* Add client event */
 	vncClientKeyevent(vnc, (event.type==SDL_KEYDOWN), key);
@@ -494,7 +504,8 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
      /* Get current mouse state */
 	priormousex = mousex;
 	priormousey = mousey;
-     mousebuttons=SDL_GetMouseState(&mousex,&mousey);
+	mousebuttons=SDL_GetMouseState(&mousex,&mousey);
+	SDL_GetRelativeMouseState(&mx, &my);
 
 	if (event.type == SDL_MOUSEBUTTONDOWN)
 		mousedown=1;
@@ -508,18 +519,56 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
 	}
 	// Pan?
 //		fprintf(stderr,"**Mouse**%d-%d\n",mousex,mousey);
-	if (inPan==1)
+	if ((event.type == SDL_MOUSEMOTION) && (inPan==1))
 	{
-		viewport.x=viewport.x-(mousex - priormousex);
-		viewport.y=viewport.y-(mousey - priormousey);
-//		fprintf(stderr,"**PAN**%d-%d  %d-%d   %d-%d\n",mousex,mousey,priormousex,priormousey,viewport.x,viewport.y);
-		if (viewport.x < 0) {
-			viewport.x=0;
-		}
-		if (viewport.y < 0) {
-			viewport.y=0;
-		}
-		inPan = 2; /* We actually did some panning.  Remember that. */
+	  //viewport.x=viewport.x+mx; // Use the relative mouse motion.
+	  //viewport.y=viewport.y+my;
+	  viewport.x=viewport.x+(mousex-priormousex);
+	  viewport.y=viewport.y+(mousey-priormousey);
+	  mousex = priormousex; // When panning, 
+	  mousey = priormousey; // leave the mouse where it was.
+	  SDL_WarpMouse(mousex,mousey);
+	  inPan |= 2; /* We actually did some panning.  Remember that. */
+	}
+#if 1 // TRY_AUTOPANNING	
+	else if (event.type == SDL_MOUSEMOTION) {
+	  // If the mouse moves outside the viewport, consider panning.
+	  if ((priormousex == 0) && (mx < 0)) {
+	    viewport.x=viewport.x+mx;
+	    inPan |= 4; /* We actually did some panning.  Remember that. */
+	  }
+	  else if ((priormousex+1 >= viewport.w) && (mx > 0)) {
+	    viewport.x=viewport.x+mx;
+	    inPan |= 4; /* We actually did some panning.  Remember that. */
+	  }
+	  if ((priormousey == 0) && (my < 0)) {
+	    viewport.y=viewport.y+my;
+	    inPan |= 4; /* We actually did some panning.  Remember that. */
+	  }
+	  else if ((priormousey+1 >= viewport.h) && (my > 0)) {
+	    viewport.y=viewport.y+my;
+	    inPan |= 4; /* We actually did some panning.  Remember that. */
+	  }
+	}
+#endif
+	// Do some bounds checks on any panning.
+	if (inPan >= 2) {
+	  // if (inPan >= 4) fprintf(stderr,"PAN  r(%d,%d)  p(%d,%d) => m(%d,%d)  V(%d,%d)\n",mx,my,priormousex,priormousey,mousex,mousey,viewport.x,viewport.y);
+#ifdef ALLOW_ZOOMING
+	  mx = ((float)(viewport.x+viewport.w))*invScale;
+	  my = ((float)(viewport.y+viewport.h))*invScale;
+	  if (mx > vnc->serverFormat.width)
+	    viewport.x=(vnc->serverFormat.width*outScale)-viewport.w;
+	  if (my > vnc->serverFormat.height)
+	    viewport.y=(vnc->serverFormat.height*outScale)-viewport.h;
+#else
+	  if ((viewport.x+viewport.w) >vnc->serverFormat.width)
+	    viewport.x=vnc->serverFormat.width-viewport.w;
+	  if ((viewport.y+viewport.h) >vnc->serverFormat.height)
+	    viewport.y=vnc->serverFormat.height-viewport.h;
+#endif	  
+	  if (viewport.x < 0) viewport.x=0;
+	  if (viewport.y < 0) viewport.y=0;
 	}
      /* Map SDL buttonmask to VNC buttonmask */
      buttonmask=0;
@@ -535,14 +584,15 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
      if (mousebuttons & SDL_BUTTON(SDL_BUTTON_WHEELUP)) buttonmask    |= 8;
      if (mousebuttons & SDL_BUTTON(SDL_BUTTON_WHEELDOWN)) buttonmask  |= 16;
      /* Add client event */
-    if (inPan != 2){
+     // if (inPan < 2)
+     { // Pass along mouse events if not actually panning.
 #ifdef ALLOW_ZOOMING
-      //vncClientPointerevent(vnc, buttonmask, (mousex / outScale)+viewport.x, (mousey / outScale)+viewport.y);
-      vncClientPointerevent(vnc, buttonmask, (mousex+viewport.x) / outScale, (mousey+viewport.y) / outScale);
+      //vncClientPointerevent(vnc, buttonmask, (mousex * invScale)+viewport.x, (mousey * invScale)+viewport.y);
+      vncClientPointerevent(vnc, buttonmask, (mousex+viewport.x) * invScale, (mousey+viewport.y) * invScale);
 #else
       vncClientPointerevent(vnc, buttonmask, mousex+viewport.x, mousey+viewport.y);
 #endif
-	}
+     }
      break;
 
     case SDL_QUIT:
@@ -552,7 +602,7 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
    }
 
    /* Blit VNC screen */
-   if (vncBlitFramebuffer(vnc, virt, &updateRect) || inPan==2) {
+   if (vncBlitFramebuffer(vnc, virt, &updateRect) || inPan >= 2) {
     /* Display by updating changed parts of the display */
 //    SDL_UpdateRect(screen,updateRect.x,updateRect.y,updateRect.w,updateRect.h);
 //    apply_surface(viewport.x,viewport.y,virt,screen);
@@ -578,9 +628,14 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
      SDL_UpdateRect(screen,0,0,0,0);
    }
    /* Delay to limit rate */                   
-  if(inPan != 2)
-   SDL_Delay(1000/vnc_framerate);
-   
+   if(inPan > 2) {
+     if (inPan >= 4) {
+       // This causes the TEXT-mode cursor to draw.  Yuck!
+       //SDL_SetCursor( NULL ); // Force a cursor redraw.
+       //SDL_UpdateRect(screen,0,0,0,0);
+     }
+     SDL_Delay(1000/vnc_framerate);
+   }
  }
 }
 
@@ -854,6 +909,7 @@ void PrintUsage()
 	SDL_WM_SetCaption("sdlvnc", "sdlvnc");
 
 #if 1 /* ZIPIT_Z2 */
+	// SDL does not draw the cursor.  VNC draws it on the virtual screen.
 	SDL_ShowCursor( SDL_DISABLE ); 
 #endif
 
