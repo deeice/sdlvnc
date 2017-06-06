@@ -33,7 +33,15 @@
 // Enable rotozoom (experimental!)
 #define ALLOW_ZOOMING
 #ifdef ALLOW_ZOOMING
-#include "SDL/SDL_rotozoom.h"
+//#include "SDL/SDL_rotozoom.h"
+typedef struct tColorRGBA {
+    Uint8 r;
+    Uint8 g;
+    Uint8 b;
+    Uint8 a;
+} tColorRGBA;
+
+SDL_Surface *zoomSurface(SDL_Surface * src, double zoomx, double zoomy, int smooth);
 #endif
 
 #define DEFAULT_W	320
@@ -259,7 +267,10 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
 // Create virtual screen 
 
 #if 1 /* ZIPIT_Z2  (was ifdef ALLOW_ZOOMING) */
+        // The fastest option is 16bpp all the way through the transformation chain.  
 	virt = SDL_CreateRGBSurface( SDL_SWSURFACE, vnc->serverFormat.width+16, vnc->serverFormat.height+16, screen->format->BitsPerPixel, screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, 0 ); 
+        // We could save a fullscreen copy every refresh if we force 32bpp for the virtual surface.
+        //virt = SDL_CreateRGBSurface( SDL_SWSURFACE, vnc->serverFormat.width+16, vnc->serverFormat.height+16, 32 /*BitsPerPixel*/, screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, 0 ); 
 #else
 	virt = SDL_CreateRGBSurface( SDL_SWSURFACE, 2000, 1080, screen->format->BitsPerPixel, screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, 0 ); 
 #endif
@@ -423,6 +434,7 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
 	 case ';': key='^'; break;
 	 case ',': key='{'; break;
 	 case '.': key='}'; break;
+         default: break;
 	 }
        }
        else { // (event.key.keysym.mod & KMOD_SHIFT) 
@@ -431,6 +443,7 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
 	 case ';': key='~'; break;
 	 case ',': key='('; break;
 	 case '.': key=')'; break;
+         default: break;
 	 }
 	 key=toupper(key);
        }
@@ -474,6 +487,7 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
 	 case SDLK_END: key=0xff56; break;
 	 case SDLK_PAGEUP: key=0xff50; break;
 	 case SDLK_PAGEDOWN: key=0xff57; break;
+         default: break;
 	 }
      }
 //     fprintf(stderr,"**KEY** %d\n",key);
@@ -955,3 +969,414 @@ void PrintUsage()
 	free(vnc_server);	
 	return(0);
 }
+
+
+/*****************************************************************************************/
+/*****************************************************************************************/
+Uint32 getpixel(SDL_Surface *surface, int x, int y)
+{
+    int bpp = surface->format->BytesPerPixel;
+    /* Here p is the address to the pixel we want to retrieve */
+    Uint8 *p = (Uint8 *)surface->pixels + y * surface->pitch + x * bpp;
+
+    switch(bpp) {
+    case 1:
+        return *p;
+        break;
+
+    case 2:
+        return *(Uint16 *)p;
+        break;
+
+    case 3:
+        if(SDL_BYTEORDER == SDL_BIG_ENDIAN)
+            return p[0] << 16 | p[1] << 8 | p[2];
+        else
+            return p[0] | p[1] << 8 | p[2] << 16;
+        break;
+
+    case 4:
+        return *(Uint32 *)p;
+        break;
+
+    default:
+        return 0;       /* shouldn't happen, but avoids warnings */
+    }
+}
+
+/*****************************************************************************************/
+void putpixel(SDL_Surface *surface, int x, int y, Uint32 pixel)
+{
+    int bpp = surface->format->BytesPerPixel;
+    /* Here p is the address to the pixel we want to set */
+    Uint8 *p = (Uint8 *)surface->pixels + y * surface->pitch + x * bpp;
+
+    switch(bpp) {
+    case 1:
+        *p = pixel;
+        break;
+
+    case 2:
+        *(Uint16 *)p = pixel;
+        break;
+
+    case 3:
+        if(SDL_BYTEORDER == SDL_BIG_ENDIAN) {
+            p[0] = (pixel >> 16) & 0xff;
+            p[1] = (pixel >> 8) & 0xff;
+            p[2] = pixel & 0xff;
+        } else {
+            p[0] = pixel & 0xff;
+            p[1] = (pixel >> 8) & 0xff;
+            p[2] = (pixel >> 16) & 0xff;
+        }
+        break;
+
+    case 4:
+        *(Uint32 *)p = pixel;
+        break;
+    }
+}
+
+
+/*****************************************************************************************/
+/*****************************************************************************************/
+int zoomSurface16(SDL_Surface * src, SDL_Surface * dst)
+{
+    int x, y, sx, sy, *csax, *csay, cs, ex, ey, t1, t2, sstep, lx, ly;
+    Uint16 *c00, *c01, *c10, *c11;
+    Uint16 *sp, *csp, *dp;
+    int r, g, b, dr, dg, db;
+    int dgap;
+    int smooth = 1;
+    
+    static int *sax = NULL;
+    static int *say = NULL;
+
+    if (smooth) {
+      /* For interpolation: assume source dimension is one pixel smaller */
+      /* to avoid overflow on right and bottom edge.  */
+	sx = (int) (65536.0 * (float) (src->w - 1) / (float) dst->w);
+	sy = (int) (65536.0 * (float) (src->h - 1) / (float) dst->h);
+    } else {
+	sx = (int) (65536.0 * (float) src->w / (float) dst->w);
+	sy = (int) (65536.0 * (float) src->h / (float) dst->h);
+    }
+
+    r = src->format->Rmask;
+    g = src->format->Gmask;
+    b = src->format->Bmask;
+
+    /*Allocate memory for row increments (but do it only once) */
+#if 1
+    if (sax == NULL) {
+        sax = (int *) malloc((src->w + 1) * sizeof(Uint32));
+        if (sax == NULL) 
+            return (-1);
+    }
+    if (say == NULL) {
+        say = (int *) malloc((src->h + 1) * sizeof(Uint32));
+        if (say == NULL) {
+            free(sax);
+            return (-1);
+        }
+    }
+#else
+    if ((sax = (int *) malloc((dst->w + 1) * sizeof(Uint32))) == NULL) {
+	return (-1);
+    }
+    if ((say = (int *) malloc((dst->h + 1) * sizeof(Uint32))) == NULL) {
+	free(sax);
+	return (-1);
+    }
+#endif
+
+    /* Precalculate row increments in sax and say arrays. */
+    sp = csp = (Uint16 *) src->pixels;
+    dp = (Uint16 *) dst->pixels;
+    cs = 0;
+    csax = sax;
+    for (x = 0; x <= dst->w; x++) {
+	*csax = cs;
+	csax++;
+	cs &= 0xffff;
+	cs += sx;
+    }
+    cs = 0;
+    csay = say;
+    for (y = 0; y <= dst->h; y++) {
+	*csay = cs;
+	csay++;
+	cs &= 0xffff;
+	cs += sy;
+    }
+    /* dest rowsize fudge for partial pixel at end after scaling? */
+    dgap = dst->pitch - dst->w * dst->format->BytesPerPixel;
+
+    if (smooth) { /* Interpolating zoom */
+	ly = 0;
+	csay = say;
+	for (y = 0; y < dst->h; y++) { /* Setup color source pointers */
+#if 1
+            c00 = csp;	    
+            c01 = csp;
+            c01++;	    
+            c10 = (Uint16 *) ((Uint8 *) csp + src->pitch);
+            c11 = c10;
+            c11++;
+            csax = sax;
+            lx = 0;
+#else
+            lx = 0; // Gotta alloc some tColorRGBAs or something
+	    // Actually gotta rewrite this as the pixels are only 16bits.
+	    c00 = getpixel(src,lx,ly);
+	    c01 = getpixel(src,lx+1,ly);
+	    c10 = getpixel(src,lx,ly+1);
+	    c11 = getpixel(src,lx+1,ly+1);
+	    // need "precalculated" r,g,b masks in register vars.
+	    // Probably also want c00,c01,c10,c11 in registers.
+#endif
+	    /* Interpolate colors (in 4 pixel square c00,c01,c10,c11 of src) */
+	    // Uses 16.16 fixed point math (assumes 8 bit color subpixels)
+	    // But I think it still works if I just mask off each subpixel
+	    // and use that mask instead of 0xff 
+	    // and also mask before storing in dp
+	    for (x = 0; x < dst->w; x++) {
+	      ex = (*csax & 0xffff); // ex,ey = fractional error terms?
+	      ey = (*csay & 0xffff); // (fractional part of 16.16 fixpoint)
+	      t1 = (((((*c01 & r) - (*c00 & r)) * ex) >> 16) + (*c00 & r)) & r;
+	      t2 = (((((*c11 & r) - (*c10 & r)) * ex) >> 16) + (*c10 & r)) & r;
+	      dr = ((((t2 - t1) * ey) >> 16) + t1) & r;
+	      t1 = (((((*c01 & g) - (*c00 & g)) * ex) >> 16) + (*c00 & g)) & g;
+	      t2 = (((((*c11 & g) - (*c10 & g)) * ex) >> 16) + (*c10 & g)) & g;
+	      dg = ((((t2 - t1) * ey) >> 16) + t1) & g;
+	      t1 = (((((*c01 & b) - (*c00 & b)) * ex) >> 16) + (*c00 & b)) & b;
+	      t2 = (((((*c11 & b) - (*c10 & b)) * ex) >> 16) + (*c10 & b)) & b;
+	      db = ((((t2 - t1) * ey) >> 16) + t1) & b;
+	      *(Uint16 *)dp = dr | dg | db;
+	      
+	      /* Advance source pointers */
+	      csax++;
+	      sstep = (*csax >> 16); // (integer part of 16.16 fixpoint)
+	      lx += sstep;
+	      if (lx >= src->w) sstep = 0;
+#if 1
+	      c00 += sstep;
+	      c01 += sstep;
+	      c10 += sstep;
+	      c11 += sstep;
+#else
+	      // Actually gotta rewrite this as the pixels are only 16bits.
+	      *c00 = (Uint16) getpixel(src,lx,ly);
+	      *c01 = (Uint16) getpixel(src,lx+1,ly);
+	      *c10 = (Uint16) getpixel(src,lx,ly+1);
+	      *c11 = (Uint16) getpixel(src,lx+1,ly+1);
+#endif
+	      /* Advance destination pointer */
+	      dp++;
+	    }
+	    /* Advance source pointer */
+	    // advancing by pitch works for any bpp so this is ok for 16bpp
+	    csay++;
+	    sstep = (*csay >> 16); // (integer part of 16.16 fixpoint)
+            ly += sstep;
+            if (ly >= src->h) sstep = 0;
+            sstep *= src->pitch;
+	    csp = (Uint16 *) ((Uint8 *) csp + sstep);
+	    /* Advance destination pointers */
+	    dp = (Uint16 *) ((Uint8 *) dp + dgap);
+	}
+    } else {	/* Non-Interpolating Zoom */
+    }
+
+#if 0
+    /* Remove temp arrays */
+    free(sax);
+    free(say);
+    sax = say = NULL;
+#endif
+
+    return (0);
+}
+
+/*****************************************************************************************/
+/* 
+ 
+ zoomSurface()
+
+ Zoomes a 32bit or 8bit 'src' surface to newly created 'dst' surface.
+ 'zoomx' and 'zoomy' are scaling factors for width and height. If 'smooth' is 1
+ then the destination 32bit surface is anti-aliased. If the surface is not 8bit
+ or 32bit RGBA/ABGR it will be converted into a 32bit RGBA format on the fly.
+
+*/
+
+#define VALUE_LIMIT	0.001
+
+void zoomSurfaceSize(int width, int height, double zoomx, double zoomy, int *dstwidth, int *dstheight)
+{
+    /*
+     * Sanity check zoom factors 
+     */
+    if (zoomx < VALUE_LIMIT) {
+	zoomx = VALUE_LIMIT;
+    }
+    if (zoomy < VALUE_LIMIT) {
+	zoomy = VALUE_LIMIT;
+    }
+
+    /*
+     * Calculate target size 
+     */
+    *dstwidth = (int) ((double) width * zoomx);
+    *dstheight = (int) ((double) height * zoomy);
+    if (*dstwidth < 1) {
+	*dstwidth = 1;
+    }
+    if (*dstheight < 1) {
+	*dstheight = 1;
+    }
+}
+
+/*****************************************************************************************/
+SDL_Surface *zoomSurface(SDL_Surface * src, double zoomx, double zoomy, int smooth)
+{
+    SDL_Surface *rz_src;
+    SDL_Surface *rz_dst;
+    int dstwidth, dstheight;
+    int is32bit;
+    int i, src_converted;
+
+    if (src == NULL) return (NULL); /* Sanity check */
+
+    /* Determine if source surface is 32bit or 8bit */
+    is32bit = (src->format->BitsPerPixel == 32);
+    if ((is32bit) || (src->format->BitsPerPixel == 16) || (src->format->BitsPerPixel == 8)) {
+	rz_src = src; /* Use source surface 'as is' */
+	src_converted = 0;
+    } else { // 24 bpp?
+	/* New source surface is 32bit with a defined RGBA ordering */
+        printf("Not 32bits, copying src to new 32bit surface.\n");
+	rz_src =
+	    SDL_CreateRGBSurface(SDL_SWSURFACE, src->w, src->h, 32, 
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+                                0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000
+#else
+                                0xff000000,  0x00ff0000, 0x0000ff00, 0x000000ff
+#endif
+	    );
+	SDL_BlitSurface(src, NULL, rz_src, NULL);
+	src_converted = 1;
+	is32bit = 1;
+    }
+
+    /* Get size if target */
+    zoomSurfaceSize(rz_src->w, rz_src->h, zoomx, zoomy, &dstwidth, &dstheight);
+
+    /*Alloc space to completely contain the zoomed surface  */
+    rz_dst = NULL;
+    
+    if (is32bit) { /*Target surface is 32bit with source RGBA/ABGR ordering */
+      rz_dst = SDL_CreateRGBSurface(SDL_SWSURFACE, dstwidth, dstheight, 32,
+				    rz_src->format->Rmask, rz_src->format->Gmask,
+				    rz_src->format->Bmask, rz_src->format->Amask);
+    } else if (src->format->BitsPerPixel == 16) {
+      /* Copy source format? */
+      //*******************************************
+      // NOTE:  This needs work.
+      //*******************************************
+	rz_dst = SDL_CreateRGBSurface( SDL_SWSURFACE, dstwidth, dstheight, src->format->BitsPerPixel, src->format->Rmask, src->format->Gmask, src->format->Bmask, 0 ); 
+    } else { /* Target surface is 8bit */
+	rz_dst = SDL_CreateRGBSurface(SDL_SWSURFACE, dstwidth, dstheight, 8, 0, 0, 0, 0);
+    }
+    
+    SDL_LockSurface(rz_src); /*Lock source surface */
+
+    if (is32bit) { /* Call the 32bit routine to do the zooming (using alpha) */
+      //zoomSurfaceRGBA(rz_src, rz_dst);
+	SDL_SetAlpha(rz_dst, SDL_SRCALPHA, 255); /* Turn on source-alpha support */
+    } else if (src->format->BitsPerPixel == 16) {
+	zoomSurface16(rz_src, rz_dst);
+    } else { /* Target surface is 8bit */
+      //zoomSurfaceY(rz_src, rz_dst);
+    }
+
+    SDL_UnlockSurface(rz_src); /* Unlock source surface */
+    if (src_converted) { /* Cleanup temp surface */
+	SDL_FreeSurface(rz_src);
+    }
+
+    return (rz_dst); /* Return destination surface */
+}
+
+/*****************************************************************************************/
+// Fast averaging code from burgerspace.
+#if 0
+  int x, y;
+  SDL_PixelFormat *fmt = theSDLScreen->format;
+  if (fmt->BytesPerPixel == 2){
+    // Use fast 16bpp average algorithm from compuphase.com/graphic/scale3.htm 
+    Uint8 *p = (Uint8 *)theSDLScreen->pixels;
+    Uint32 a, b, c, m; // Three pixel values to work with and the underflow mask.
+    m = 0xffff & ~((1 << fmt->Rshift) | (1 << fmt->Rshift) | (1 << fmt->Rshift));
+    for (y=0; y<240; y++) {
+      for (x=0; x<320; x++) {
+        // Average 2 pixels from one row.
+        a = *(Uint32 *)p;
+        b = a >> 16;
+        a &= 0xffff;
+        a = (((a ^ b) & m) >> 1) + (a & b); 
+        // Average 2 pixels from next row.
+        c = *(Uint32 *)(p+theSDLScreen->pitch);
+        b = c >> 16;
+        c &= 0xffff;
+        c = (((c ^ b) & m) >> 1) + (c & b); 
+        // Average the average pixels to squeeze 2x2 pixels to 1..
+        a = (((a ^ c) & m) >> 1) + (a & c); 
+        putpixel(theSDLDisplay, x, y, a);
+        p += 4;
+        }
+      p += theSDLScreen->pitch;
+    }      
+  }
+
+/*****************************************************************************************/
+/* Extracting color components from a 32-bit color value */
+SDL_PixelFormat *fmt;
+SDL_Surface *surface;
+Uint32 temp, pixel;
+Uint8 red, green, blue, alpha;
+
+fmt = surface->format;
+SDL_LockSurface(surface);
+pixel = *((Uint32*)surface->pixels);
+SDL_UnlockSurface(surface);
+
+/* Get Red component */
+temp = pixel & fmt->Rmask;  /* Isolate red component */
+temp = temp >> fmt->Rshift; /* Shift it down to 8-bit */
+temp = temp << fmt->Rloss;  /* Expand to a full 8-bit number */
+red = (Uint8)temp;
+
+/* Get Green component */
+temp = pixel & fmt->Gmask;  /* Isolate green component */
+temp = temp >> fmt->Gshift; /* Shift it down to 8-bit */
+temp = temp << fmt->Gloss;  /* Expand to a full 8-bit number */
+green = (Uint8)temp;
+
+/* Get Blue component */
+temp = pixel & fmt->Bmask;  /* Isolate blue component */
+temp = temp >> fmt->Bshift; /* Shift it down to 8-bit */
+temp = temp << fmt->Bloss;  /* Expand to a full 8-bit number */
+blue = (Uint8)temp;
+
+/* Get Alpha component */
+temp = pixel & fmt->Amask;  /* Isolate alpha component */
+temp = temp >> fmt->Ashift; /* Shift it down to 8-bit */
+temp = temp << fmt->Aloss;  /* Expand to a full 8-bit number */
+alpha = (Uint8)temp;
+
+printf("Pixel Color -> R: %d,  G: %d,  B: %d,  A: %d\n", red, green, blue, alpha);
+
+#endif
+
