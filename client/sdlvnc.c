@@ -626,17 +626,17 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
      if (outScale == 1.0)
        SDL_BlitSurface(virt,&viewport,screen,&origin);
      else {
-         clock_t start_t, end_t;
-         double total_t;
-         start_t = clock();
+       //  clock_t start_t, end_t;
+       //  double total_t;
+       //  start_t = clock();
        SDL_FreeSurface(zoomvirt); 
        //fprintf(stderr,"**zoomScale = %1.2f \n",outScale);
        if ((zoomvirt = zoomSurface(virt, outScale, outScale, 1)) != NULL) {
 	 //fprintf(stderr,"**zoomBlit = %1.2f \n",outScale);
 	 SDL_BlitSurface(zoomvirt,&viewport,screen,&origin);
-       end_t = clock();
-       total_t = (double) (end_t - start_t) / CLOCKS_PER_SEC;
-       fprintf(stderr, "Total CPU time = %f (%lu - %lu)\n", total_t, end_t, start_t);
+       // end_t = clock();
+       // total_t = (double) (end_t - start_t) / CLOCKS_PER_SEC;
+       // fprintf(stderr, "Total CPU time = %f (%lu - %lu)\n", total_t, end_t, start_t);
        }
        else 
 	 SDL_BlitSurface(virt,&viewport,screen,&origin);
