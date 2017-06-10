@@ -626,11 +626,17 @@ void Draw(SDL_Surface *screen, tSDL_vnc *vnc)
      if (outScale == 1.0)
        SDL_BlitSurface(virt,&viewport,screen,&origin);
      else {
+         clock_t start_t, end_t;
+         double total_t;
+         start_t = clock();
        SDL_FreeSurface(zoomvirt); 
        //fprintf(stderr,"**zoomScale = %1.2f \n",outScale);
        if ((zoomvirt = zoomSurface(virt, outScale, outScale, 1)) != NULL) {
 	 //fprintf(stderr,"**zoomBlit = %1.2f \n",outScale);
 	 SDL_BlitSurface(zoomvirt,&viewport,screen,&origin);
+       end_t = clock();
+       total_t = (double) (end_t - start_t) / CLOCKS_PER_SEC;
+       fprintf(stderr, "Total CPU time = %f (%lu - %lu)\n", total_t, end_t, start_t);
        }
        else 
 	 SDL_BlitSurface(virt,&viewport,screen,&origin);
@@ -1044,7 +1050,7 @@ void putpixel(SDL_Surface *surface, int x, int y, Uint32 pixel)
 int zoomSurface16(SDL_Surface * src, SDL_Surface * dst)
 {
     int x, y, sx, sy, *csax, *csay, cs, ex, ey, t1, t2, sstep, lx, ly;
-    Uint16 *c00, *c01, *c10, *c11;
+    Uint16 *c0, *c1;
     Uint16 *sp, *csp, *dp;
     int r, g, b, dr, dg, db;
     int dgap;
@@ -1117,63 +1123,40 @@ int zoomSurface16(SDL_Surface * src, SDL_Surface * dst)
 	ly = 0;
 	csay = say;
 	for (y = 0; y < dst->h; y++) { /* Setup color source pointers */
-#if 1
-            c00 = csp;	    
-            c01 = csp;
-            c01++;	    
-            c10 = (Uint16 *) ((Uint8 *) csp + src->pitch);
-            c11 = c10;
-            c11++;
+            c0 = csp;	    
+            c1 = (Uint16 *) ((Uint8 *) csp + src->pitch);
             csax = sax;
             lx = 0;
-#else
-            lx = 0; // Gotta alloc some tColorRGBAs or something
-	    // Actually gotta rewrite this as the pixels are only 16bits.
-	    c00 = getpixel(src,lx,ly);
-	    c01 = getpixel(src,lx+1,ly);
-	    c10 = getpixel(src,lx,ly+1);
-	    c11 = getpixel(src,lx+1,ly+1);
-	    // need "precalculated" r,g,b masks in register vars.
-	    // Probably also want c00,c01,c10,c11 in registers.
-#endif
 	    /* Interpolate colors (in 4 pixel square c00,c01,c10,c11 of src) */
+	    // Use 2 ptrs with const offsets 0,1 (vs 4 ptrs) for loop optimization.
 	    // Uses 16.16 fixed point math (assumes 8 bit color subpixels)
 	    // But I think it still works if I just mask off each subpixel
-	    // and use that mask instead of 0xff 
-	    // and also mask before storing in dp
+	    // and use that mask instead of 0xff.  Also mask before storing result.
+	    ey = (*csay & 0xffff); // (fractional part of 16.16 fixpoint)
 	    for (x = 0; x < dst->w; x++) {
 	      ex = (*csax & 0xffff); // ex,ey = fractional error terms?
-	      ey = (*csay & 0xffff); // (fractional part of 16.16 fixpoint)
-	      t1 = (((((*c01 & r) - (*c00 & r)) * ex) >> 16) + (*c00 & r)) & r;
-	      t2 = (((((*c11 & r) - (*c10 & r)) * ex) >> 16) + (*c10 & r)) & r;
+	      t1 = (((((c0[1] & r) - (c0[0] & r)) * ex) >> 16) + (c0[0] & r));// & r;
+	      t2 = (((((c1[1] & r) - (c1[0] & r)) * ex) >> 16) + (c1[0] & r));// & r;
 	      dr = ((((t2 - t1) * ey) >> 16) + t1) & r;
-	      t1 = (((((*c01 & g) - (*c00 & g)) * ex) >> 16) + (*c00 & g)) & g;
-	      t2 = (((((*c11 & g) - (*c10 & g)) * ex) >> 16) + (*c10 & g)) & g;
+	      t1 = (((((c0[1] & g) - (c0[0] & g)) * ex) >> 16) + (c0[0] & g));// & g;
+	      t2 = (((((c1[1] & g) - (c1[0] & g)) * ex) >> 16) + (c1[0] & g));// & g;
 	      dg = ((((t2 - t1) * ey) >> 16) + t1) & g;
-	      t1 = (((((*c01 & b) - (*c00 & b)) * ex) >> 16) + (*c00 & b)) & b;
-	      t2 = (((((*c11 & b) - (*c10 & b)) * ex) >> 16) + (*c10 & b)) & b;
+	      t1 = (((((c0[1] & b) - (c0[0] & b)) * ex) >> 16) + (c0[0] & b));// & b;
+	      t2 = (((((c1[1] & b) - (c1[0] & b)) * ex) >> 16) + (c1[0] & b));// & b;
 	      db = ((((t2 - t1) * ey) >> 16) + t1) & b;
 	      *(Uint16 *)dp = dr | dg | db;
 	      
+	      /* Advance destination pointer */
+	      dp++;
+
 	      /* Advance source pointers */
 	      csax++;
 	      sstep = (*csax >> 16); // (integer part of 16.16 fixpoint)
 	      lx += sstep;
 	      if (lx >= src->w) sstep = 0;
-#if 1
-	      c00 += sstep;
-	      c01 += sstep;
-	      c10 += sstep;
-	      c11 += sstep;
-#else
-	      // Actually gotta rewrite this as the pixels are only 16bits.
-	      *c00 = (Uint16) getpixel(src,lx,ly);
-	      *c01 = (Uint16) getpixel(src,lx+1,ly);
-	      *c10 = (Uint16) getpixel(src,lx,ly+1);
-	      *c11 = (Uint16) getpixel(src,lx+1,ly+1);
-#endif
-	      /* Advance destination pointer */
-	      dp++;
+
+	      c0 += sstep;
+	      c1 += sstep;
 	    }
 	    /* Advance source pointer */
 	    // advancing by pitch works for any bpp so this is ok for 16bpp
